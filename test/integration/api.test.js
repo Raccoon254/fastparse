@@ -2,6 +2,7 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { buildServer } from "../../src/api/server.js";
+import { createCache } from "../../src/cache/index.js";
 
 let upstream;
 let upstreamUrl;
@@ -41,7 +42,16 @@ before(async () => {
   const { port } = upstream.address();
   upstreamUrl = `http://127.0.0.1:${port}/`;
 
-  app = buildServer({ logger: false });
+  app = buildServer({
+    logger: false,
+    deps: {
+      cache: createCache(),
+      // Disable the renderer in the default test app so we don't try to
+      // launch a real browser; tests that exercise the renderer inject
+      // their own.
+      renderer: { render: async () => { throw new Error("renderer disabled"); }, close: async () => {} },
+    },
+  });
   await app.ready();
 });
 
@@ -114,7 +124,8 @@ test("GET /extract returns 422 when no content can be extracted", async () => {
     logger: false,
     deps: {
       fetchHtml: async () => ({
-        html: "<html></html>",
+        // Big enough that isThinContent returns false → renderer is not invoked.
+        html: "<html><body>" + "x".repeat(600) + "</body></html>",
         finalUrl: "http://x.test/",
         status: 200,
         contentType: "text/html",
@@ -137,7 +148,7 @@ test("GET /extract returns 500 on unexpected internal errors", async () => {
     logger: false,
     deps: {
       fetchHtml: async () => ({
-        html: "<html></html>",
+        html: "<html><body>" + "x".repeat(600) + "</body></html>",
         finalUrl: "http://x.test/",
         status: 200,
         contentType: "text/html",
@@ -155,4 +166,105 @@ test("GET /extract returns 500 on unexpected internal errors", async () => {
   assert.equal(res.statusCode, 500);
   assert.equal(res.json().error, "internal error");
   await brokenApp.close();
+});
+
+test("GET /extract serves second hit from cache", async () => {
+  let calls = 0;
+  const cachedApp = buildServer({
+    logger: false,
+    deps: {
+      fetchHtml: async () => {
+        calls++;
+        return {
+          html: `<html><body><article>${"<p>hello world with enough commas, words, and text. </p>".repeat(20)}</article></body></html>`,
+          finalUrl: "http://cached.test/",
+          status: 200,
+          contentType: "text/html",
+        };
+      },
+    },
+  });
+  await cachedApp.ready();
+
+  const r1 = await cachedApp.inject({ method: "GET", url: "/extract?url=http://cached.test/" });
+  const r2 = await cachedApp.inject({ method: "GET", url: "/extract?url=http://cached.test/" });
+
+  assert.equal(r1.statusCode, 200);
+  assert.equal(r2.statusCode, 200);
+  assert.equal(r1.headers["x-fastparse-cache"], "miss");
+  assert.equal(r2.headers["x-fastparse-cache"], "hit");
+  assert.equal(calls, 1, "fetchHtml should only run once");
+  assert.deepEqual(r2.json(), r1.json());
+
+  // ?fresh=1 should bypass the cache.
+  const r3 = await cachedApp.inject({ method: "GET", url: "/extract?url=http://cached.test/&fresh=1" });
+  assert.equal(r3.headers["x-fastparse-cache"], "miss");
+  assert.equal(calls, 2);
+
+  await cachedApp.close();
+});
+
+test("GET /extract uses renderer when fetched HTML is thin", async () => {
+  let renderedCalls = 0;
+  const renderedApp = buildServer({
+    logger: false,
+    deps: {
+      fetchHtml: async () => ({
+        html: `<html><body><div id="root"></div></body></html>`,
+        finalUrl: "http://spa.test/",
+        status: 200,
+        contentType: "text/html",
+      }),
+      renderer: {
+        render: async () => {
+          renderedCalls++;
+          return {
+            html: `<html><body><article><h1>SPA</h1>${"<p>rendered prose with words, commas, and text. </p>".repeat(20)}</article></body></html>`,
+            finalUrl: "http://spa.test/",
+            status: 200,
+            contentType: "text/html",
+            rendered: true,
+          };
+        },
+        close: async () => {},
+      },
+    },
+  });
+  await renderedApp.ready();
+
+  const res = await renderedApp.inject({ method: "GET", url: "/extract?url=http://spa.test/" });
+  assert.equal(res.statusCode, 200);
+  const body = res.json();
+  assert.equal(renderedCalls, 1);
+  assert.equal(body.metadata.rendered, true);
+  assert.match(JSON.stringify(body.sections), /rendered prose/);
+
+  await renderedApp.close();
+});
+
+test("GET /extract falls back gracefully when renderer fails on thin content", async () => {
+  const fallbackApp = buildServer({
+    logger: false,
+    deps: {
+      fetchHtml: async () => ({
+        html: `<html><body><div id="root"></div></body></html>`,
+        finalUrl: "http://spa.test/",
+        status: 200,
+        contentType: "text/html",
+      }),
+      renderer: {
+        render: async () => {
+          throw new Error("playwright not installed");
+        },
+        close: async () => {},
+      },
+    },
+  });
+  await fallbackApp.ready();
+
+  // Thin content + failed renderer + cheerio body = single empty-ish section.
+  const res = await fallbackApp.inject({ method: "GET", url: "/extract?url=http://spa.test/" });
+  // Should not 500 — we degrade to whatever the original HTML had.
+  assert.notEqual(res.statusCode, 500);
+  await fallbackApp.close();
 });

@@ -116,7 +116,38 @@ jobs:
           path: coverage.txt
 
   # ----------------------------------------------------------------------
-  # 5. Smoke: boot the real server and hit it with curl, end-to-end.
+  # 5. E2E: real Playwright + local SPA fixture. Verifies the renderer
+  #    fallback path actually works against a JS-only page.
+  # ----------------------------------------------------------------------
+  e2e:
+    name: E2E (Playwright SPA)
+    needs: [unit, integration]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install npm deps
+        run: npm ci
+      - name: Cache Playwright browsers
+        id: pw-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: pw-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+      - name: Install Playwright chromium + system deps
+        if: steps.pw-cache.outputs.cache-hit != 'true'
+        run: npx playwright install --with-deps chromium
+      - name: Install Playwright system deps only (cached browsers)
+        if: steps.pw-cache.outputs.cache-hit == 'true'
+        run: npx playwright install-deps chromium
+      - name: Run e2e tests
+        run: npm run test:e2e
+
+  # ----------------------------------------------------------------------
+  # 6. Smoke: boot the real server and hit it with curl, end-to-end.
   # ----------------------------------------------------------------------
   smoke:
     name: Smoke (HTTP boot)
