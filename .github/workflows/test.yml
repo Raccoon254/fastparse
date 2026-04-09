@@ -34,48 +34,110 @@ jobs:
       - name: Run unit tests
         run: npm test
 
-      - name: Boot server in background
+      - name: Write fixture HTML
         run: |
-          node src/index.js &
-          echo $! > server.pid
+          mkdir -p fixtures
+          cat > fixtures/index.html <<'HTML'
+          <!doctype html>
+          <html lang="en">
+          <head>
+            <meta charset="utf-8">
+            <title>Fixture Page</title>
+            <meta property="og:title" content="Fixture Page">
+          </head>
+          <body>
+            <nav>nav junk you should not see</nav>
+            <header>header junk</header>
+            <article>
+              <h1>Fixture Page</h1>
+              <h2>Intro</h2>
+              <p>This is the first paragraph of the intro section. It has commas, words, and meaningful prose so the scorer picks it up as content.</p>
+              <p>A second paragraph that adds enough text length to clearly beat the noise blocks around it.</p>
+              <h2>Details</h2>
+              <p>Details paragraph one, with more words and punctuation, to ensure the section is captured.</p>
+              <p>Details paragraph two, also reasonably long and prose-shaped.</p>
+            </article>
+            <aside>sidebar junk you should not see</aside>
+            <footer>footer junk</footer>
+          </body>
+          </html>
+          HTML
+
+      - name: Serve fixture on :8080
+        run: |
+          cd fixtures
+          python3 -m http.server 8080 > ../fixture-server.log 2>&1 &
+          echo $! > ../fixture.pid
+          cd ..
           for i in 1 2 3 4 5 6 7 8 9 10; do
-            if curl -fsS http://127.0.0.1:3000/health > /dev/null; then
-              echo "server is up"
+            if curl -fsS http://127.0.0.1:8080/index.html > /dev/null; then
+              echo "fixture server up"
               exit 0
             fi
             sleep 0.5
           done
-          echo "server failed to start" >&2
+          echo "fixture server failed to start" >&2
+          cat fixture-server.log
+          exit 1
+
+      - name: Boot fastparse server in background
+        run: |
+          node src/index.js > server.log 2>&1 &
+          echo $! > server.pid
+          for i in 1 2 3 4 5 6 7 8 9 10; do
+            if curl -fsS http://127.0.0.1:3000/health > /dev/null; then
+              echo "fastparse up"
+              exit 0
+            fi
+            sleep 0.5
+          done
+          echo "fastparse failed to start" >&2
+          cat server.log
           exit 1
 
       - name: Hit /health
         run: |
           curl -fsS http://127.0.0.1:3000/health | tee /dev/stderr | grep -q '"ok":true'
 
-      - name: Extract example.com
+      - name: Extract fixture page
         run: |
-          response=$(curl -fsS "http://127.0.0.1:3000/extract?url=https://example.com")
+          response=$(curl -fsS "http://127.0.0.1:3000/extract?url=http://127.0.0.1:8080/index.html")
           echo "$response"
           echo "$response" | node -e "
             let s='';process.stdin.on('data',c=>s+=c).on('end',()=>{
               const d=JSON.parse(s);
-              if(!d.title) {console.error('missing title');process.exit(1);}
-              if(!Array.isArray(d.sections)||d.sections.length===0) {console.error('no sections');process.exit(1);}
-              if(!d.metadata||typeof d.metadata.word_count!=='number') {console.error('bad metadata');process.exit(1);}
-              console.log('OK',d.title,d.metadata.word_count,'words');
+              const fail=(m)=>{console.error('FAIL:',m);process.exit(1);};
+              if(d.title!=='Fixture Page') fail('title='+d.title);
+              if(!Array.isArray(d.sections)||d.sections.length<2) fail('sections='+JSON.stringify(d.sections));
+              const headings=d.sections.map(s=>s.heading);
+              if(!headings.includes('Intro')) fail('missing Intro heading: '+headings.join(','));
+              if(!headings.includes('Details')) fail('missing Details heading: '+headings.join(','));
+              const all=d.sections.map(s=>s.content).join(' ');
+              if(/sidebar junk|footer junk|nav junk|header junk/.test(all)) fail('noise leaked into output');
+              if(typeof d.metadata.word_count!=='number'||d.metadata.word_count<20) fail('bad word_count='+d.metadata.word_count);
+              console.log('OK title=\"'+d.title+'\" sections='+d.sections.length+' words='+d.metadata.word_count);
             });
           "
 
       - name: Reject bad input
         run: |
           code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:3000/extract")
-          test "$code" = "400" || (echo "expected 400, got $code" && exit 1)
+          test "$code" = "400" || (echo "expected 400 for missing url, got $code" && exit 1)
           code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:3000/extract?url=ftp://example.com")
-          test "$code" = "400" || (echo "expected 400 for ftp, got $code" && exit 1)
+          test "$code" = "400" || (echo "expected 400 for ftp scheme, got $code" && exit 1)
+          code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:3000/extract?url=not-a-url")
+          test "$code" = "400" || (echo "expected 400 for bad url, got $code" && exit 1)
 
-      - name: Stop server
+      - name: Dump server log on failure
+        if: failure()
+        run: |
+          echo "=== fastparse server.log ==="
+          cat server.log || true
+          echo "=== fixture-server.log ==="
+          cat fixture-server.log || true
+
+      - name: Stop servers
         if: always()
         run: |
-          if [ -f server.pid ]; then
-            kill "$(cat server.pid)" 2>/dev/null || true
-          fi
+          if [ -f server.pid ]; then kill "$(cat server.pid)" 2>/dev/null || true; fi
+          if [ -f fixture.pid ]; then kill "$(cat fixture.pid)" 2>/dev/null || true; fi
