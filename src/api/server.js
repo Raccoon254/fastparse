@@ -2,12 +2,28 @@
 // Fastify HTTP server exposing GET /extract.
 
 import Fastify from "fastify";
-import { fetchHtml, FetchError } from "../fetch/index.js";
-import { parseHtml, getTitle } from "../parse/index.js";
-import { findMainContent } from "../extract/index.js";
-import { toSections, buildDocument } from "../format/index.js";
+import {
+  fetchHtml as defaultFetchHtml,
+  FetchError,
+} from "../fetch/index.js";
+import {
+  parseHtml as defaultParseHtml,
+  getTitle as defaultGetTitle,
+} from "../parse/index.js";
+import { findMainContent as defaultFindMainContent } from "../extract/index.js";
+import {
+  toSections as defaultToSections,
+  buildDocument as defaultBuildDocument,
+} from "../format/index.js";
 
-export function buildServer({ logger = true } = {}) {
+export function buildServer({ logger = true, deps = {} } = {}) {
+  const fetchHtml = deps.fetchHtml ?? defaultFetchHtml;
+  const parseHtml = deps.parseHtml ?? defaultParseHtml;
+  const getTitle = deps.getTitle ?? defaultGetTitle;
+  const findMainContent = deps.findMainContent ?? defaultFindMainContent;
+  const toSections = deps.toSections ?? defaultToSections;
+  const buildDocument = deps.buildDocument ?? defaultBuildDocument;
+
   const app = Fastify({ logger });
 
   app.get("/health", async () => ({ ok: true }));

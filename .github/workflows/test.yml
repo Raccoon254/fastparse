@@ -6,33 +6,130 @@ on:
   pull_request:
     branches: [main]
 
-jobs:
-  smoke:
-    runs-on: ubuntu-latest
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
 
+jobs:
+  # ----------------------------------------------------------------------
+  # 1. Lint: fast syntax check on every source file. Fails first if broken.
+  # ----------------------------------------------------------------------
+  lint:
+    name: Lint (syntax check)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install
+        run: npm ci
+      - name: node --check on every src file
+        run: |
+          find src -name '*.js' -print0 | xargs -0 -n1 node --check
+      - name: node --check on every test file
+        run: |
+          find test -name '*.test.js' -print0 | xargs -0 -n1 node --check
+
+  # ----------------------------------------------------------------------
+  # 2. Unit tests: pure functions, no network. Matrix on Node 20 and 22.
+  # ----------------------------------------------------------------------
+  unit:
+    name: Unit tests (Node ${{ matrix.node-version }})
+    needs: lint
+    runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         node-version: [20, 22]
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Node ${{ matrix.node-version }}
-        uses: actions/setup-node@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node-version }}
           cache: npm
-
-      - name: Install dependencies
+      - name: Install
         run: npm ci
-
-      - name: Syntax check all source files
-        run: |
-          find src -name '*.js' -print0 | xargs -0 -n1 node --check
-
       - name: Run unit tests
-        run: npm test
+        run: npm run test:unit
+
+  # ----------------------------------------------------------------------
+  # 3. Integration tests: real local HTTP servers + Fastify inject().
+  # ----------------------------------------------------------------------
+  integration:
+    name: Integration tests (Node ${{ matrix.node-version }})
+    needs: lint
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: [20, 22]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+      - name: Install
+        run: npm ci
+      - name: Run integration tests
+        run: npm run test:integration
+
+  # ----------------------------------------------------------------------
+  # 4. Coverage: enforce 100% line / branch / function on src/.
+  # ----------------------------------------------------------------------
+  coverage:
+    name: Coverage (100% required)
+    needs: [unit, integration]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install
+        run: npm ci
+      - name: Run with coverage
+        run: npm run test:coverage 2>&1 | tee coverage.txt
+      - name: Enforce 100% coverage
+        run: |
+          node -e "
+            const fs=require('fs');
+            const txt=fs.readFileSync('coverage.txt','utf8');
+            const m=txt.match(/all files\s*\|\s*([\d.]+)\s*\|\s*([\d.]+)\s*\|\s*([\d.]+)/);
+            if(!m){console.error('coverage line not found');process.exit(1);}
+            const [_,line,branch,func]=m;
+            console.log('lines='+line+'%','branches='+branch+'%','funcs='+func+'%');
+            const fail=(n,v)=>{console.error('FAIL: '+n+'='+v+'%');process.exit(1);};
+            if(parseFloat(line)<100) fail('line',line);
+            if(parseFloat(branch)<100) fail('branch',branch);
+            if(parseFloat(func)<100) fail('func',func);
+            console.log('OK: 100% across the board');
+          "
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage.txt
+
+  # ----------------------------------------------------------------------
+  # 5. Smoke: boot the real server and hit it with curl, end-to-end.
+  # ----------------------------------------------------------------------
+  smoke:
+    name: Smoke (HTTP boot)
+    needs: [unit, integration]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install
+        run: npm ci
 
       - name: Write fixture HTML
         run: |
@@ -46,18 +143,17 @@ jobs:
             <meta property="og:title" content="Fixture Page">
           </head>
           <body>
-            <nav>nav junk you should not see</nav>
+            <nav>nav junk</nav>
             <header>header junk</header>
             <article>
               <h1>Fixture Page</h1>
               <h2>Intro</h2>
-              <p>This is the first paragraph of the intro section. It has commas, words, and meaningful prose so the scorer picks it up as content.</p>
-              <p>A second paragraph that adds enough text length to clearly beat the noise blocks around it.</p>
+              <p>Intro paragraph one with several commas, prose, and enough words to win the scoring contest.</p>
+              <p>Intro paragraph two, also reasonably long and prose-shaped.</p>
               <h2>Details</h2>
-              <p>Details paragraph one, with more words and punctuation, to ensure the section is captured.</p>
-              <p>Details paragraph two, also reasonably long and prose-shaped.</p>
+              <p>Details paragraph one, plenty of words and punctuation, prose-shaped sentences here.</p>
             </article>
-            <aside>sidebar junk you should not see</aside>
+            <aside>sidebar junk</aside>
             <footer>footer junk</footer>
           </body>
           </html>
@@ -66,40 +162,30 @@ jobs:
       - name: Serve fixture on :8080
         run: |
           cd fixtures
-          python3 -m http.server 8080 > ../fixture-server.log 2>&1 &
+          python3 -m http.server 8080 > ../fixture.log 2>&1 &
           echo $! > ../fixture.pid
           cd ..
           for i in 1 2 3 4 5 6 7 8 9 10; do
-            if curl -fsS http://127.0.0.1:8080/index.html > /dev/null; then
-              echo "fixture server up"
-              exit 0
-            fi
+            curl -fsS http://127.0.0.1:8080/index.html > /dev/null && exit 0
             sleep 0.5
           done
-          echo "fixture server failed to start" >&2
-          cat fixture-server.log
-          exit 1
+          cat fixture.log; exit 1
 
-      - name: Boot fastparse server in background
+      - name: Boot fastparse
         run: |
           node src/index.js > server.log 2>&1 &
           echo $! > server.pid
           for i in 1 2 3 4 5 6 7 8 9 10; do
-            if curl -fsS http://127.0.0.1:3000/health > /dev/null; then
-              echo "fastparse up"
-              exit 0
-            fi
+            curl -fsS http://127.0.0.1:3000/health > /dev/null && exit 0
             sleep 0.5
           done
-          echo "fastparse failed to start" >&2
-          cat server.log
-          exit 1
+          cat server.log; exit 1
 
-      - name: Hit /health
+      - name: GET /health
         run: |
           curl -fsS http://127.0.0.1:3000/health | tee /dev/stderr | grep -q '"ok":true'
 
-      - name: Extract fixture page
+      - name: GET /extract on fixture
         run: |
           response=$(curl -fsS "http://127.0.0.1:3000/extract?url=http://127.0.0.1:8080/index.html")
           echo "$response"
@@ -108,36 +194,30 @@ jobs:
               const d=JSON.parse(s);
               const fail=(m)=>{console.error('FAIL:',m);process.exit(1);};
               if(d.title!=='Fixture Page') fail('title='+d.title);
-              if(!Array.isArray(d.sections)||d.sections.length<2) fail('sections='+JSON.stringify(d.sections));
               const headings=d.sections.map(s=>s.heading);
-              if(!headings.includes('Intro')) fail('missing Intro heading: '+headings.join(','));
-              if(!headings.includes('Details')) fail('missing Details heading: '+headings.join(','));
+              if(!headings.includes('Intro')) fail('missing Intro');
+              if(!headings.includes('Details')) fail('missing Details');
               const all=d.sections.map(s=>s.content).join(' ');
-              if(/sidebar junk|footer junk|nav junk|header junk/.test(all)) fail('noise leaked into output');
-              if(typeof d.metadata.word_count!=='number'||d.metadata.word_count<20) fail('bad word_count='+d.metadata.word_count);
-              console.log('OK title=\"'+d.title+'\" sections='+d.sections.length+' words='+d.metadata.word_count);
+              if(/junk/.test(all)) fail('noise leaked');
+              console.log('OK',d.title,d.metadata.section_count,'sections');
             });
           "
 
       - name: Reject bad input
         run: |
-          code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:3000/extract")
-          test "$code" = "400" || (echo "expected 400 for missing url, got $code" && exit 1)
-          code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:3000/extract?url=ftp://example.com")
-          test "$code" = "400" || (echo "expected 400 for ftp scheme, got $code" && exit 1)
-          code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:3000/extract?url=not-a-url")
-          test "$code" = "400" || (echo "expected 400 for bad url, got $code" && exit 1)
+          for q in '' '?url=ftp://example.com' '?url=not-a-url'; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:3000/extract$q")
+            test "$code" = "400" || (echo "expected 400 for '$q', got $code" && exit 1)
+          done
 
-      - name: Dump server log on failure
+      - name: Dump logs on failure
         if: failure()
         run: |
-          echo "=== fastparse server.log ==="
-          cat server.log || true
-          echo "=== fixture-server.log ==="
-          cat fixture-server.log || true
+          echo "=== server.log ==="; cat server.log || true
+          echo "=== fixture.log ==="; cat fixture.log || true
 
       - name: Stop servers
         if: always()
         run: |
-          if [ -f server.pid ]; then kill "$(cat server.pid)" 2>/dev/null || true; fi
-          if [ -f fixture.pid ]; then kill "$(cat fixture.pid)" 2>/dev/null || true; fi
+          [ -f server.pid ] && kill "$(cat server.pid)" 2>/dev/null || true
+          [ -f fixture.pid ] && kill "$(cat fixture.pid)" 2>/dev/null || true

@@ -71,7 +71,7 @@ export async function fetchHtml(url, opts = {}) {
   return {
     html,
     status: res.status,
-    finalUrl: res.url || url,
+    finalUrl: res.url,
     contentType,
   };
 }

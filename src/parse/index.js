@@ -43,6 +43,14 @@ const STRIP_SELECTORS = [
   ".pagination",
   ".comments",
   ".comment-list",
+  // Real-world class names rarely use the bare token, so match substrings too.
+  '[class*="cookie" i]',
+  '[class*="consent" i]',
+  '[class*="advert" i]',
+  '[class*="newsletter" i]',
+  '[class*="social-share" i]',
+  '[id*="cookie" i]',
+  '[id*="advert" i]',
 ];
 
 /**

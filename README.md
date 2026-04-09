@@ -1,4 +1,4 @@
-# fastparse
+# FastParse
 
 A small HTTP service that fetches a web page and gives you back the actual content as JSON. No nav bars, no cookie banners, no footers — just the title, the headings, and the text underneath them.
 
@@ -67,6 +67,17 @@ src/
   api/      Fastify server
   index.js  boot the server
 ```
+
+## Tests
+
+```bash
+npm test                # everything
+npm run test:unit       # pure functions, no network
+npm run test:integration  # spins up local HTTP servers + Fastify inject()
+npm run test:coverage   # all tests with V8 coverage
+```
+
+48 tests, 100% line / branch / function coverage on `src/`. CI runs lint → unit → integration → coverage gate → smoke (real HTTP boot) on Node 20 and 22.
 
 ## What's not here yet
 

@@ -7,7 +7,10 @@
   "scripts": {
     "start": "node src/index.js",
     "dev": "nodemon src/index.js",
-    "test": "echo \"no tests yet\" && exit 0"
+    "test": "node --test test/unit/*.test.js test/integration/*.test.js",
+    "test:unit": "node --test test/unit/*.test.js",
+    "test:integration": "node --test test/integration/*.test.js",
+    "test:coverage": "node --test --experimental-test-coverage --test-coverage-include=src/**/*.js test/unit/*.test.js test/integration/*.test.js"
   },
   "engines": {
     "node": ">=20"
