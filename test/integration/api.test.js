@@ -201,6 +201,11 @@ test("GET /extract serves second hit from cache", async () => {
   assert.equal(r3.headers["x-fastparse-cache"], "miss");
   assert.equal(calls, 2);
 
+  // ?fresh=true should also bypass the cache.
+  const r4 = await cachedApp.inject({ method: "GET", url: "/extract?url=http://cached.test/&fresh=true" });
+  assert.equal(r4.headers["x-fastparse-cache"], "miss");
+  assert.equal(calls, 3);
+
   await cachedApp.close();
 });
 
@@ -338,6 +343,179 @@ test("GET /extract rejects zero or negative ?max with 400", async () => {
     });
     assert.equal(res.statusCode, 400, `max=${v}`);
   }
+});
+
+test("GET /extract returns markdown when ?format=markdown", async () => {
+  const res = await app.inject({
+    method: "GET",
+    url: `/extract?url=${encodeURIComponent(upstreamUrl)}&format=markdown`,
+  });
+  assert.equal(res.statusCode, 200);
+  const body = res.json();
+  assert.equal(body.metadata.format, "markdown");
+  assert.equal(typeof body.content, "string");
+  assert.match(body.content, /# API Test Page|## Intro/);
+  assert.match(body.content, /## Intro/);
+  assert.match(body.content, /## Details/);
+  assert.ok(body.metadata.word_count > 10);
+});
+
+test("GET /extract markdown response strips noise", async () => {
+  const res = await app.inject({
+    method: "GET",
+    url: `/extract?url=${encodeURIComponent(upstreamUrl)}&format=markdown`,
+  });
+  const md = res.json().content;
+  for (const noise of ["NAV_NOISE", "HEADER_NOISE", "ASIDE_NOISE", "FOOTER_NOISE"]) {
+    assert.doesNotMatch(md, new RegExp(noise));
+  }
+});
+
+test("GET /extract markdown summary mode keeps top-N sections", async () => {
+  const res = await app.inject({
+    method: "GET",
+    url: `/extract?url=${encodeURIComponent(upstreamUrl)}&format=markdown&mode=summary&max=1`,
+  });
+  assert.equal(res.statusCode, 200);
+  const body = res.json();
+  assert.equal(body.metadata.mode, "summary");
+  // With max=1 we should have at most one ## heading in the output.
+  const h2s = (body.content.match(/^##\s+/gm) || []).length;
+  assert.ok(h2s <= 1, `expected <=1 h2, got ${h2s}`);
+});
+
+test("buildServer() boots with all defaults", async () => {
+  const defaultApp = buildServer();
+  await defaultApp.ready();
+  const res = await defaultApp.inject({ method: "GET", url: "/health" });
+  assert.equal(res.statusCode, 200);
+  await defaultApp.close();
+});
+
+test("GET /extract markdown handles content with no headings", async () => {
+  const headinglessApp = buildServer({
+    logger: false,
+    deps: {
+      isThinContent: () => false,
+      fetchHtml: async () => ({
+        html: `<html><body><article>${"<p>plain paragraph with words and commas, more text. </p>".repeat(15)}</article></body></html>`,
+        finalUrl: "http://noheadings.test/",
+        status: 200,
+        contentType: "text/html",
+      }),
+    },
+  });
+  await headinglessApp.ready();
+
+  const res = await headinglessApp.inject({
+    method: "GET",
+    url: "/extract?url=http://noheadings.test/&format=markdown",
+  });
+  assert.equal(res.statusCode, 200);
+  const body = res.json();
+  assert.equal(body.metadata.section_count, 0);
+  assert.ok(body.metadata.word_count > 10);
+
+  await headinglessApp.close();
+});
+
+test("buildServer skips renderer.close when the renderer has no close()", async () => {
+  // Some renderer implementations might be stateless and not provide a close()
+  // method. The onClose hook should tolerate that.
+  const noCloseApp = buildServer({
+    logger: false,
+    deps: {
+      renderer: { render: async () => ({ html: "", finalUrl: "", rendered: true }) },
+    },
+  });
+  await noCloseApp.ready();
+  await noCloseApp.close();
+});
+
+test("GET /extract markdown reuses cached extraction across formats", async () => {
+  let calls = 0;
+  const dualApp = buildServer({
+    logger: false,
+    deps: {
+      isThinContent: () => false,
+      fetchHtml: async () => {
+        calls++;
+        return {
+          html: `<html><body><article>
+            <h1>Dual Format</h1>
+            <h2>Section A</h2><p>${"alpha alpha alpha alpha, ".repeat(20)}</p>
+            <h2>Section B</h2><p>${"bravo bravo bravo bravo, ".repeat(20)}</p>
+          </article></body></html>`,
+          finalUrl: "http://dual.test/",
+          status: 200,
+          contentType: "text/html",
+        };
+      },
+    },
+  });
+  await dualApp.ready();
+
+  const r1 = await dualApp.inject({ method: "GET", url: "/extract?url=http://dual.test/" });
+  const r2 = await dualApp.inject({ method: "GET", url: "/extract?url=http://dual.test/&format=markdown" });
+  const r3 = await dualApp.inject({ method: "GET", url: "/extract?url=http://dual.test/" });
+
+  assert.equal(r1.headers["x-fastparse-cache"], "miss");
+  assert.equal(r2.headers["x-fastparse-cache"], "hit");
+  assert.equal(r3.headers["x-fastparse-cache"], "hit");
+  assert.equal(calls, 1);
+
+  assert.equal(r1.json().metadata.format, "json");
+  assert.equal(r2.json().metadata.format, "markdown");
+  assert.match(r2.json().content, /## Section A/);
+  assert.match(r2.json().content, /## Section B/);
+
+  await dualApp.close();
+});
+
+test("GET /extract markdown response sets metadata.rendered when renderer was used", async () => {
+  const renderedApp = buildServer({
+    logger: false,
+    deps: {
+      fetchHtml: async () => ({
+        html: `<html><body><div id="root"></div></body></html>`,
+        finalUrl: "http://spa-md.test/",
+        status: 200,
+        contentType: "text/html",
+      }),
+      renderer: {
+        render: async () => ({
+          html: `<html><body><article><h1>SPA</h1>${"<p>rendered prose with words and commas, more text. </p>".repeat(20)}</article></body></html>`,
+          finalUrl: "http://spa-md.test/",
+          status: 200,
+          contentType: "text/html",
+          rendered: true,
+        }),
+        close: async () => {},
+      },
+    },
+  });
+  await renderedApp.ready();
+
+  const res = await renderedApp.inject({
+    method: "GET",
+    url: "/extract?url=http://spa-md.test/&format=markdown",
+  });
+  assert.equal(res.statusCode, 200);
+  const body = res.json();
+  assert.equal(body.metadata.format, "markdown");
+  assert.equal(body.metadata.rendered, true);
+  assert.match(body.content, /rendered prose/);
+
+  await renderedApp.close();
+});
+
+test("GET /extract rejects unknown ?format with 400", async () => {
+  const res = await app.inject({
+    method: "GET",
+    url: `/extract?url=${encodeURIComponent(upstreamUrl)}&format=xml`,
+  });
+  assert.equal(res.statusCode, 400);
+  assert.match(res.json().error, /unknown format/);
 });
 
 test("GET /extract falls back gracefully when renderer fails on thin content", async () => {
