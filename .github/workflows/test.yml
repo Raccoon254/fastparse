@@ -1,0 +1,81 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        node-version: [20, 22]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Syntax check all source files
+        run: |
+          find src -name '*.js' -print0 | xargs -0 -n1 node --check
+
+      - name: Run unit tests
+        run: npm test
+
+      - name: Boot server in background
+        run: |
+          node src/index.js &
+          echo $! > server.pid
+          for i in 1 2 3 4 5 6 7 8 9 10; do
+            if curl -fsS http://127.0.0.1:3000/health > /dev/null; then
+              echo "server is up"
+              exit 0
+            fi
+            sleep 0.5
+          done
+          echo "server failed to start" >&2
+          exit 1
+
+      - name: Hit /health
+        run: |
+          curl -fsS http://127.0.0.1:3000/health | tee /dev/stderr | grep -q '"ok":true'
+
+      - name: Extract example.com
+        run: |
+          response=$(curl -fsS "http://127.0.0.1:3000/extract?url=https://example.com")
+          echo "$response"
+          echo "$response" | node -e "
+            let s='';process.stdin.on('data',c=>s+=c).on('end',()=>{
+              const d=JSON.parse(s);
+              if(!d.title) {console.error('missing title');process.exit(1);}
+              if(!Array.isArray(d.sections)||d.sections.length===0) {console.error('no sections');process.exit(1);}
+              if(!d.metadata||typeof d.metadata.word_count!=='number') {console.error('bad metadata');process.exit(1);}
+              console.log('OK',d.title,d.metadata.word_count,'words');
+            });
+          "
+
+      - name: Reject bad input
+        run: |
+          code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:3000/extract")
+          test "$code" = "400" || (echo "expected 400, got $code" && exit 1)
+          code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:3000/extract?url=ftp://example.com")
+          test "$code" = "400" || (echo "expected 400 for ftp, got $code" && exit 1)
+
+      - name: Stop server
+        if: always()
+        run: |
+          if [ -f server.pid ]; then
+            kill "$(cat server.pid)" 2>/dev/null || true
+          fi
