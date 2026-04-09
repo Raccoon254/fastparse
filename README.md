@@ -55,8 +55,68 @@ Successive requests for the same URL serve from cache regardless of `?mode` — 
 
 ## How it works
 
+```mermaid
+flowchart TD
+    A([GET /extract?url=&hellip;]) --> V[validate url, mode, max]
+    V --> C{cache<br/>hit?}
+    C -- yes --> O
+    C -- no --> L1[per-host limiter<br/><sub>concurrency + RPS</sub>]
+    L1 --> F[fetchHtml<br/><sub>undici, 15s timeout, follow redirects</sub>]
+    F --> T{thin<br/>content?}
+    T -- no --> P
+    T -- yes --> L2[per-host limiter]
+    L2 --> R[Playwright render<br/><sub>headless chromium, networkidle</sub>]
+    R --> P
+    P[parse &rarr; clean &rarr; score &rarr; extract &rarr; format<br/><sub>cheerio + scoring heuristics</sub>] --> S[(cache raw doc)]
+    S --> O[optimize<br/><sub>dedup, drop tiny, mode=summary</sub>]
+    O --> J([JSON response])
+
+    classDef io fill:#1f6feb,stroke:#1f6feb,color:#fff
+    classDef cache fill:#8957e5,stroke:#8957e5,color:#fff
+    classDef branch fill:#bf8700,stroke:#bf8700,color:#fff
+    class A,J io
+    class S cache
+    class C,T branch
 ```
-url -> cache? -> [per-host limit] -> fetch -> thin? -> [per-host limit] -> render -> parse -> clean -> score -> extract -> format -> [cache raw] -> optimize -> json
+
+The same flow in plain text:
+
+```
+GET /extract?url=…
+    │
+    ▼
+validate url + opts
+    │
+    ▼
+cache hit? ───── yes ─────┐
+    │ no                  │
+    ▼                     │
+per-host limiter          │
+    │                     │
+    ▼                     │
+fetchHtml (undici)        │
+    │                     │
+    ▼                     │
+thin content?             │
+    │ no    │ yes         │
+    │       ▼             │
+    │   per-host limiter  │
+    │       │             │
+    │       ▼             │
+    │   Playwright render │
+    │       │             │
+    ▼       ▼             │
+parse → clean → score     │
+  → extract → format      │
+    │                     │
+    ▼                     │
+cache.set(url, rawDoc)    │
+    │                     │
+    ▼                     ▼
+    optimize(doc, mode)
+    │
+    ▼
+JSON response
 ```
 
 1. **cache** is checked first. Hits are returned immediately. `?fresh=1` skips it. (LRU, 500 entries, 10 min TTL by default.)
