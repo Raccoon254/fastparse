@@ -266,13 +266,16 @@ test("GET /extract reuses cached raw doc across modes", async () => {
   const cachedApp = buildServer({
     logger: false,
     deps: {
+      // Disable the thin-content detector so this test never tries to launch
+      // a real browser; we're testing the cache, not the renderer.
+      isThinContent: () => false,
       fetchHtml: async () => {
         calls++;
         return {
           html: `<html><body><article>
-            <h2>One</h2><p>${"x ".repeat(50)}</p>
-            <h2>Two</h2><p>${"y ".repeat(100)}</p>
-            <h2>Three</h2><p>${"z ".repeat(20)}</p>
+            <h2>One</h2><p>${"alpha alpha alpha alpha alpha, ".repeat(20)}</p>
+            <h2>Two</h2><p>${"bravo bravo bravo bravo bravo, ".repeat(40)}</p>
+            <h2>Three</h2><p>${"charlie charlie charlie, ".repeat(15)}</p>
           </article></body></html>`,
           finalUrl: "http://multi-mode.test/",
           status: 200,
