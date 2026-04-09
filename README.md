@@ -1,5 +1,7 @@
 # FastParse
 
+[![test](https://github.com/Raccoon254/fastparse/actions/workflows/test.yml/badge.svg)](https://github.com/Raccoon254/fastparse/actions/workflows/test.yml)
+
 A small HTTP service that fetches a web page and gives you back the actual content as JSON. No nav bars, no cookie banners, no footers — just the title, the headings, and the text underneath them.
 
 It exists because feeding raw HTML (or even the raw text of a page) to an LLM is wasteful and noisy. fastparse is the layer in between.
