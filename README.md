@@ -56,18 +56,19 @@ Successive requests for the same URL serve from cache regardless of `?mode` — 
 ## How it works
 
 ```
-url -> cache? -> fetch -> thin? -> render -> parse -> clean -> score -> extract -> format -> [cache raw] -> optimize -> json
+url -> cache? -> [per-host limit] -> fetch -> thin? -> [per-host limit] -> render -> parse -> clean -> score -> extract -> format -> [cache raw] -> optimize -> json
 ```
 
 1. **cache** is checked first. Hits are returned immediately. `?fresh=1` skips it. (LRU, 500 entries, 10 min TTL by default.)
-2. **fetch** grabs the HTML over `undici` with a 15s timeout and follows redirects.
-3. **thin?** If the fetched HTML looks like an SPA shell — under 500 chars of real text, or contains an "enable JavaScript" message — fastparse hands off to the renderer.
-4. **render** launches a shared headless chromium via Playwright, navigates to the URL with `waitUntil: networkidle`, and grabs `page.content()`. The browser is launched once and reused. If Playwright isn't installed, this step is skipped and you get whatever the original fetch returned.
-5. **parse** loads the HTML into cheerio and rips out the obvious junk: scripts, styles, nav, footer, aside, forms, share buttons, cookie banners, anything matching `[role="navigation"]` or `[class*="cookie"]`, etc.
-6. **score** walks every block-ish node and gives it points for text length, paragraph count, and prose-y signals (commas), and takes points away for link density and bad class/id hints (`sidebar`, `comments`, `promo`, …). `<article>` and `<main>` get a head start.
-7. **extract** picks the highest scorer. There's a fast path: if the page has a meaty `<article>` or `<main>`, it just uses that.
-8. **format** walks the winner in document order, splits on `h1-h6`, and emits a `{heading, content}[]` array. This raw document is cached.
-9. **optimize** runs on every response: drops headingless sub-5-word fragments, dedupes paragraphs across the whole document (case-and-punctuation-insensitive), and in `summary` mode keeps the longest N sections in original order. The cache key is just the URL, so swapping `?mode` is free.
+2. **per-host limit** wraps every fetch and render call in a token-bucket + concurrency cap, scoped to `parsedUrl.host`. Defaults: 4 concurrent in-flight requests and 4 RPS per host. Different hosts never block each other.
+3. **fetch** grabs the HTML over `undici` with a 15s timeout and follows redirects.
+4. **thin?** If the fetched HTML looks like an SPA shell — under 500 chars of real text, or contains an "enable JavaScript" message — fastparse hands off to the renderer (also under the host limit).
+5. **render** launches a shared headless chromium via Playwright, navigates to the URL with `waitUntil: networkidle`, and grabs `page.content()`. The browser is launched once and reused. If Playwright isn't installed, this step is skipped and you get whatever the original fetch returned.
+6. **parse** loads the HTML into cheerio and rips out the obvious junk: scripts, styles, nav, footer, aside, forms, share buttons, cookie banners, anything matching `[role="navigation"]` or `[class*="cookie"]`, etc.
+7. **score** walks every block-ish node and gives it points for text length, paragraph count, and prose-y signals (commas), and takes points away for link density and bad class/id hints (`sidebar`, `comments`, `promo`, …). `<article>` and `<main>` get a head start.
+8. **extract** picks the highest scorer. There's a fast path: if the page has a meaty `<article>` or `<main>`, it just uses that.
+9. **format** walks the winner in document order, splits on `h1-h6`, and emits a `{heading, content}[]` array. This raw document is cached.
+10. **optimize** runs on every response: drops headingless sub-5-word fragments, dedupes paragraphs across the whole document (case-and-punctuation-insensitive), and in `summary` mode keeps the longest N sections in original order. The cache key is just the URL, so swapping `?mode` is free.
 
 That's the whole engine. Each step is one file under `src/`.
 
@@ -78,6 +79,7 @@ src/
   fetch/    undici GET, AbortController timeout, content-type guard
   render/   thin-content detector + Playwright renderer (lazy)
   cache/    LRU wrapper (lru-cache)
+  limit/    per-host concurrency + token-bucket rate limit
   parse/    cheerio load + noise stripping, title resolution
   score/    node scoring heuristics
   extract/  pick the winning container
@@ -113,13 +115,13 @@ npm run test:e2e          # real Playwright against a local SPA fixture
 npm run test:coverage     # unit + integration with V8 coverage, gated at 100%
 ```
 
-89 unit + integration tests, 2 e2e, 100% line / branch / function coverage on `src/`. CI runs lint → unit → integration → coverage gate + e2e (Playwright) + smoke (real HTTP boot) on Node 20 and 22.
+98 unit + integration tests, 2 e2e, 100% line / branch / function coverage on `src/`. CI runs lint → unit → integration → coverage gate + e2e (Playwright) + smoke (real HTTP boot) on Node 20 and 22.
 
 ## What's not here yet
 
 - **Intent extraction** (`?intent=pricing`). The plumbing isn't there yet.
-- **Per-host rate limiting** and concurrency control.
 - **Persistent cache.** Right now it's in-process LRU only.
+- **Per-host limits exposed as HTTP headers.** Stats are tracked internally but not yet returned.
 
 ## Stack
 

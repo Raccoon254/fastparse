@@ -19,6 +19,7 @@ import { createCache } from "../cache/index.js";
 import { isThinContent as defaultIsThinContent } from "../render/detect.js";
 import { createRenderer } from "../render/index.js";
 import { optimizeDocument as defaultOptimizeDocument } from "../optimize/index.js";
+import { createLimiter } from "../limit/index.js";
 
 export function buildServer({ logger = true, deps = {} } = {}) {
   const fetchHtml = deps.fetchHtml ?? defaultFetchHtml;
@@ -31,6 +32,7 @@ export function buildServer({ logger = true, deps = {} } = {}) {
   const optimizeDocument = deps.optimizeDocument ?? defaultOptimizeDocument;
   const cache = deps.cache ?? createCache();
   const renderer = deps.renderer ?? createRenderer();
+  const limiter = deps.limiter ?? createLimiter();
 
   const app = Fastify({ logger });
 
@@ -79,12 +81,13 @@ export function buildServer({ logger = true, deps = {} } = {}) {
     reply.header("x-fastparse-cache", "miss");
 
     try {
-      let { html, finalUrl } = await fetchHtml(url);
+      const host = parsedUrl.host;
+      let { html, finalUrl } = await limiter.run(host, () => fetchHtml(url));
       let rendered = false;
 
       if (isThinContent(html)) {
         try {
-          const r = await renderer.render(url);
+          const r = await limiter.run(host, () => renderer.render(url));
           html = r.html;
           finalUrl = r.finalUrl;
           rendered = true;
