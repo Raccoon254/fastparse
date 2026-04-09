@@ -41,12 +41,22 @@ You get back something like:
 }
 ```
 
-There's also `GET /health` if you need a liveness check, `?fresh=1` to bypass the cache, and an `x-fastparse-cache: hit|miss` response header so you can tell what happened.
+There's also `GET /health` for liveness, `?fresh=1` to bypass the cache, an `x-fastparse-cache: hit|miss` response header, and `?mode=summary&max=N` to keep only the top-N longest sections.
+
+```bash
+# Full document
+curl "http://127.0.0.1:3000/extract?url=https://example.com/long-article"
+
+# Just the 3 longest sections, deduped
+curl "http://127.0.0.1:3000/extract?url=https://example.com/long-article&mode=summary&max=3"
+```
+
+Successive requests for the same URL serve from cache regardless of `?mode` — the raw extraction is cached once and the optimizer runs on every response.
 
 ## How it works
 
 ```
-url -> cache? -> fetch -> thin? -> render -> parse -> clean -> score -> extract -> format -> cache -> json
+url -> cache? -> fetch -> thin? -> render -> parse -> clean -> score -> extract -> format -> [cache raw] -> optimize -> json
 ```
 
 1. **cache** is checked first. Hits are returned immediately. `?fresh=1` skips it. (LRU, 500 entries, 10 min TTL by default.)
@@ -56,7 +66,8 @@ url -> cache? -> fetch -> thin? -> render -> parse -> clean -> score -> extract 
 5. **parse** loads the HTML into cheerio and rips out the obvious junk: scripts, styles, nav, footer, aside, forms, share buttons, cookie banners, anything matching `[role="navigation"]` or `[class*="cookie"]`, etc.
 6. **score** walks every block-ish node and gives it points for text length, paragraph count, and prose-y signals (commas), and takes points away for link density and bad class/id hints (`sidebar`, `comments`, `promo`, …). `<article>` and `<main>` get a head start.
 7. **extract** picks the highest scorer. There's a fast path: if the page has a meaty `<article>` or `<main>`, it just uses that.
-8. **format** walks the winner in document order, splits on `h1-h6`, and emits a `{heading, content}[]` array.
+8. **format** walks the winner in document order, splits on `h1-h6`, and emits a `{heading, content}[]` array. This raw document is cached.
+9. **optimize** runs on every response: drops headingless sub-5-word fragments, dedupes paragraphs across the whole document (case-and-punctuation-insensitive), and in `summary` mode keeps the longest N sections in original order. The cache key is just the URL, so swapping `?mode` is free.
 
 That's the whole engine. Each step is one file under `src/`.
 
@@ -71,6 +82,7 @@ src/
   score/    node scoring heuristics
   extract/  pick the winning container
   format/   walk the container into sections
+  optimize/ dedup, drop tiny sections, summary mode
   api/      Fastify server
   index.js  boot the server
 ```
@@ -101,13 +113,13 @@ npm run test:e2e          # real Playwright against a local SPA fixture
 npm run test:coverage     # unit + integration with V8 coverage, gated at 100%
 ```
 
-68 tests, 100% line / branch / function coverage on `src/`. CI runs lint → unit → integration → coverage gate + e2e (Playwright) + smoke (real HTTP boot) on Node 20 and 22.
+89 unit + integration tests, 2 e2e, 100% line / branch / function coverage on `src/`. CI runs lint → unit → integration → coverage gate + e2e (Playwright) + smoke (real HTTP boot) on Node 20 and 22.
 
 ## What's not here yet
 
-- **Token optimizer.** Dedup, merge tiny fragments, drop low-density blocks.
 - **Intent extraction** (`?intent=pricing`). The plumbing isn't there yet.
 - **Per-host rate limiting** and concurrency control.
+- **Persistent cache.** Right now it's in-process LRU only.
 
 ## Stack
 

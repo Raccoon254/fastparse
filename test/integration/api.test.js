@@ -242,6 +242,101 @@ test("GET /extract uses renderer when fetched HTML is thin", async () => {
   await renderedApp.close();
 });
 
+test("GET /extract supports ?mode=summary", async () => {
+  const res = await app.inject({
+    method: "GET",
+    url: `/extract?url=${encodeURIComponent(upstreamUrl)}&mode=summary&max=1`,
+  });
+  assert.equal(res.statusCode, 200);
+  const body = res.json();
+  assert.equal(body.metadata.mode, "summary");
+  assert.equal(body.sections.length, 1);
+});
+
+test("GET /extract returns full mode when no ?mode is given", async () => {
+  const res = await app.inject({
+    method: "GET",
+    url: `/extract?url=${encodeURIComponent(upstreamUrl)}`,
+  });
+  assert.equal(res.json().metadata.mode, "full");
+});
+
+test("GET /extract reuses cached raw doc across modes", async () => {
+  let calls = 0;
+  const cachedApp = buildServer({
+    logger: false,
+    deps: {
+      fetchHtml: async () => {
+        calls++;
+        return {
+          html: `<html><body><article>
+            <h2>One</h2><p>${"x ".repeat(50)}</p>
+            <h2>Two</h2><p>${"y ".repeat(100)}</p>
+            <h2>Three</h2><p>${"z ".repeat(20)}</p>
+          </article></body></html>`,
+          finalUrl: "http://multi-mode.test/",
+          status: 200,
+          contentType: "text/html",
+        };
+      },
+    },
+  });
+  await cachedApp.ready();
+
+  const r1 = await cachedApp.inject({ method: "GET", url: "/extract?url=http://multi-mode.test/" });
+  const r2 = await cachedApp.inject({ method: "GET", url: "/extract?url=http://multi-mode.test/&mode=summary&max=1" });
+  const r3 = await cachedApp.inject({ method: "GET", url: "/extract?url=http://multi-mode.test/" });
+
+  assert.equal(r1.headers["x-fastparse-cache"], "miss");
+  assert.equal(r2.headers["x-fastparse-cache"], "hit");
+  assert.equal(r3.headers["x-fastparse-cache"], "hit");
+  assert.equal(calls, 1, "fetch should run once across all three calls");
+
+  assert.equal(r1.json().metadata.mode, "full");
+  assert.equal(r2.json().metadata.mode, "summary");
+  assert.equal(r2.json().sections.length, 1);
+  assert.equal(r3.json().metadata.mode, "full");
+
+  await cachedApp.close();
+});
+
+test("GET /extract rejects unknown ?mode with 400", async () => {
+  const res = await app.inject({
+    method: "GET",
+    url: `/extract?url=${encodeURIComponent(upstreamUrl)}&mode=bogus`,
+  });
+  assert.equal(res.statusCode, 400);
+  assert.match(res.json().error, /unknown mode/);
+});
+
+test("GET /extract accepts mode=full explicitly", async () => {
+  const res = await app.inject({
+    method: "GET",
+    url: `/extract?url=${encodeURIComponent(upstreamUrl)}&mode=full`,
+  });
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.json().metadata.mode, "full");
+});
+
+test("GET /extract rejects non-integer ?max with 400", async () => {
+  const res = await app.inject({
+    method: "GET",
+    url: `/extract?url=${encodeURIComponent(upstreamUrl)}&max=abc`,
+  });
+  assert.equal(res.statusCode, 400);
+  assert.match(res.json().error, /max must be a positive integer/);
+});
+
+test("GET /extract rejects zero or negative ?max with 400", async () => {
+  for (const v of ["0", "-3"]) {
+    const res = await app.inject({
+      method: "GET",
+      url: `/extract?url=${encodeURIComponent(upstreamUrl)}&max=${v}`,
+    });
+    assert.equal(res.statusCode, 400, `max=${v}`);
+  }
+});
+
 test("GET /extract falls back gracefully when renderer fails on thin content", async () => {
   const fallbackApp = buildServer({
     logger: false,
