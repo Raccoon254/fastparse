@@ -22,6 +22,7 @@ import { createRenderer } from "../render/index.js";
 import { optimizeDocument as defaultOptimizeDocument } from "../optimize/index.js";
 import { optimizeMarkdown as defaultOptimizeMarkdown } from "../optimize/markdown.js";
 import { createLimiter } from "../limit/index.js";
+import { createStorage } from "../storage/index.js";
 
 export function buildServer({ logger = true, deps = {} } = {}) {
   const fetchHtml = deps.fetchHtml ?? defaultFetchHtml;
@@ -37,6 +38,7 @@ export function buildServer({ logger = true, deps = {} } = {}) {
   const cache = deps.cache ?? createCache();
   const renderer = deps.renderer ?? createRenderer();
   const limiter = deps.limiter ?? createLimiter();
+  const storage = deps.storage ?? createStorage();
 
   const app = Fastify({ logger });
 
@@ -127,6 +129,17 @@ export function buildServer({ logger = true, deps = {} } = {}) {
       };
       cache.set(cacheKey, entry);
 
+      // Archive both formats to disk if storage is enabled. Errors are
+      // logged and swallowed — a disk problem must never break extraction.
+      if (storage.enabled) {
+        archiveEntry(req, url, entry).catch((err) => {
+          req.log.warn(
+            { url, err: err.message },
+            "storage save failed",
+          );
+        });
+      }
+
       return renderResponse(entry, outputFormat, optimizeOpts);
     } catch (err) {
       if (err instanceof FetchError) {
@@ -136,6 +149,25 @@ export function buildServer({ logger = true, deps = {} } = {}) {
       return reply.code(500).send({ error: "internal error" });
     }
   });
+
+  async function archiveEntry(req, url, entry) {
+    const { title, finalUrl, rendered, sections, containerHtml, extractedAt } =
+      entry;
+
+    // Always archive the FULL versions, not the user-requested mode/max
+    // slice. The query params control the response, not what's persisted.
+    const jsonDoc = optimizeDocument(
+      buildDocument({ url: finalUrl, title, sections }),
+      {},
+    );
+    jsonDoc.metadata.extracted_at = extractedAt;
+    if (rendered) jsonDoc.metadata.rendered = true;
+    jsonDoc.metadata.format = "json";
+
+    const markdown = toMarkdown(containerHtml, { baseUrl: finalUrl });
+
+    return storage.save({ url, json: jsonDoc, markdown });
+  }
 
   function renderResponse(entry, outputFormat, optimizeOpts) {
     const { title, finalUrl, rendered, sections, containerHtml, extractedAt } =

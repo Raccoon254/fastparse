@@ -35,3 +35,6 @@ Thumbs.db
 .vscode/
 *.swp
 .claude
+
+# Extracted data archive (configurable via FASTPARSE_STORAGE_DIR)
+data/

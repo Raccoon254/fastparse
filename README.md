@@ -174,6 +174,8 @@ src/
   extract/  pick the winning container
   format/   walk the container into sections + markdown via turndown
   optimize/ dedup, drop tiny sections, summary mode (json + markdown)
+  storage/  archive each extraction to {dir}/{host}/{path}/{timestamp}.{ext}
+  config/   defaults + env-var overrides
   api/      Fastify server
   index.js  boot the server
 ```
@@ -204,12 +206,61 @@ npm run test:e2e          # real Playwright against a local SPA fixture
 npm run test:coverage     # unit + integration with V8 coverage, gated at 100%
 ```
 
-125 unit + integration tests, 2 e2e, 100% line / branch / function coverage on `src/`. CI runs lint → unit → integration → coverage gate + e2e (Playwright) + smoke (real HTTP boot) on Node 20 and 22.
+157 unit + integration tests, 2 e2e, 100% line / branch / function coverage on `src/`. CI runs lint → unit → integration → coverage gate + e2e (Playwright) + smoke (real HTTP boot) on Node 20 and 22.
+
+## Persistent storage
+
+Every successful extraction is archived to disk so you can replay or audit it later. The default layout mirrors the URL:
+
+```
+data/
+  axene.io/
+    about/
+      2026-04-09T11-30-00-123Z.json
+      2026-04-09T11-30-00-123Z.markdown
+    pricing/
+      2026-04-09T11-31-04-002Z.json
+      2026-04-09T11-31-04-002Z.markdown
+  example.com/
+    blog/
+      hello-world/
+        2026-04-09T11-32-15-808Z.json
+        2026-04-09T11-32-15-808Z.markdown
+```
+
+Both formats are written on every cache miss regardless of which `?format` the client asked for — the query params control what's *returned*, not what's *archived*. Cache hits don't re-write.
+
+The `data/` directory is gitignored.
+
+### Configuration
+
+Defaults live in `src/config/index.js` and can be overridden either by passing a config object to `loadConfig({ overrides })` or by setting environment variables before booting the server:
+
+| Env var | Default | Notes |
+|---|---|---|
+| `FASTPARSE_HOST` | `127.0.0.1` | bind address |
+| `FASTPARSE_PORT` | `3000` | server port |
+| `FASTPARSE_STORAGE_ENABLED` | `true` | set to `false` to disable disk archiving |
+| `FASTPARSE_STORAGE_DIR` | `./data` | absolute or relative path |
+| `FASTPARSE_STORAGE_FORMATS` | `json,markdown` | comma-separated subset |
+| `FASTPARSE_CACHE_MAX` | `500` | LRU max entries |
+| `FASTPARSE_CACHE_TTL_MS` | `600000` | LRU TTL |
+| `FASTPARSE_LIMIT_CONCURRENCY` | `4` | per-host concurrent requests |
+| `FASTPARSE_LIMIT_RPS` | `4` | per-host token-bucket refill rate |
+
+```bash
+FASTPARSE_STORAGE_DIR=/var/lib/fastparse \
+FASTPARSE_STORAGE_FORMATS=markdown \
+FASTPARSE_LIMIT_RPS=2 \
+npm start
+```
+
+Storage failures are logged and swallowed — a disk problem will never break a `/extract` response.
 
 ## What's not here yet
 
 - **Intent extraction** (`?intent=pricing`). The plumbing isn't there yet.
-- **Persistent cache.** Right now it's in-process LRU only.
+- **Persistent cache.** Disk archiving exists but the in-memory LRU is still the only thing read from on cache hits.
 - **Per-host limits exposed as HTTP headers.** Stats are tracked internally but not yet returned.
 
 ## Stack

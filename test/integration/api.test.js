@@ -419,6 +419,163 @@ test("GET /extract markdown handles content with no headings", async () => {
   await headinglessApp.close();
 });
 
+test("GET /extract triggers storage.save on cache miss with both formats", async () => {
+  const calls = [];
+  const stubStorage = {
+    enabled: true,
+    dir: "/tmp/test",
+    formats: ["json", "markdown"],
+    async save(args) {
+      calls.push(args);
+      return { dir: "/tmp/test/x", written: ["a.json", "a.markdown"] };
+    },
+  };
+  const savingApp = buildServer({
+    logger: false,
+    deps: {
+      isThinContent: () => false,
+      storage: stubStorage,
+      fetchHtml: async () => ({
+        html: `<html><body><article>
+          <h1>Save Me</h1>
+          <p>${"prose with words and commas, lots of text. ".repeat(20)}</p>
+        </article></body></html>`,
+        finalUrl: "http://save.test/",
+        status: 200,
+        contentType: "text/html",
+      }),
+    },
+  });
+  await savingApp.ready();
+
+  // Wait for the fire-and-forget save to land before asserting.
+  const r1 = await savingApp.inject({ method: "GET", url: "/extract?url=http://save.test/" });
+  assert.equal(r1.statusCode, 200);
+  await new Promise((r) => setImmediate(r));
+  await new Promise((r) => setImmediate(r));
+
+  assert.equal(calls.length, 1, "save should fire on the cache miss");
+  assert.equal(calls[0].url, "http://save.test/");
+  assert.equal(typeof calls[0].markdown, "string");
+  assert.match(calls[0].markdown, /Save Me/);
+  assert.equal(typeof calls[0].json, "object");
+  assert.equal(calls[0].json.title, "Save Me");
+  assert.equal(calls[0].json.metadata.format, "json");
+
+  // A second request should hit cache and NOT save again.
+  const r2 = await savingApp.inject({ method: "GET", url: "/extract?url=http://save.test/" });
+  assert.equal(r2.headers["x-fastparse-cache"], "hit");
+  await new Promise((r) => setImmediate(r));
+  assert.equal(calls.length, 1, "cache hit should not re-save");
+
+  await savingApp.close();
+});
+
+test("GET /extract storage.save records rendered=true when renderer was used", async () => {
+  const calls = [];
+  const stubStorage = {
+    enabled: true,
+    dir: "/tmp/x",
+    formats: ["json", "markdown"],
+    async save(args) {
+      calls.push(args);
+      return { dir: "/tmp/x", written: [] };
+    },
+  };
+  const renderedSavingApp = buildServer({
+    logger: false,
+    deps: {
+      storage: stubStorage,
+      fetchHtml: async () => ({
+        html: `<html><body><div id="root"></div></body></html>`,
+        finalUrl: "http://spa-save.test/",
+        status: 200,
+        contentType: "text/html",
+      }),
+      renderer: {
+        render: async () => ({
+          html: `<html><body><article><h1>SPA Save</h1>${"<p>rendered prose with words and commas, more text. </p>".repeat(20)}</article></body></html>`,
+          finalUrl: "http://spa-save.test/",
+          status: 200,
+          contentType: "text/html",
+          rendered: true,
+        }),
+        close: async () => {},
+      },
+    },
+  });
+  await renderedSavingApp.ready();
+  await renderedSavingApp.inject({ method: "GET", url: "/extract?url=http://spa-save.test/" });
+  await new Promise((r) => setImmediate(r));
+  await new Promise((r) => setImmediate(r));
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].json.metadata.rendered, true);
+
+  await renderedSavingApp.close();
+});
+
+test("GET /extract continues to respond when storage.save fails", async () => {
+  const failingStorage = {
+    enabled: true,
+    dir: "/tmp/test",
+    formats: ["json", "markdown"],
+    async save() {
+      throw new Error("disk full");
+    },
+  };
+  const app2 = buildServer({
+    logger: false,
+    deps: {
+      isThinContent: () => false,
+      storage: failingStorage,
+      fetchHtml: async () => ({
+        html: `<html><body><article><h1>X</h1><p>${"alpha alpha alpha alpha, ".repeat(20)}</p></article></body></html>`,
+        finalUrl: "http://fail-save.test/",
+        status: 200,
+        contentType: "text/html",
+      }),
+    },
+  });
+  await app2.ready();
+
+  const res = await app2.inject({ method: "GET", url: "/extract?url=http://fail-save.test/" });
+  assert.equal(res.statusCode, 200, "storage failure must not break extraction");
+  // Let the swallowed rejection settle so it doesn't bleed into the next test.
+  await new Promise((r) => setImmediate(r));
+  await new Promise((r) => setImmediate(r));
+
+  await app2.close();
+});
+
+test("GET /extract does not call storage when storage.enabled=false", async () => {
+  let called = false;
+  const offStorage = {
+    enabled: false,
+    async save() {
+      called = true;
+    },
+  };
+  const app3 = buildServer({
+    logger: false,
+    deps: {
+      isThinContent: () => false,
+      storage: offStorage,
+      fetchHtml: async () => ({
+        html: `<html><body><article><h1>off</h1><p>${"x x x x x x x x x x x ".repeat(15)}</p></article></body></html>`,
+        finalUrl: "http://off.test/",
+        status: 200,
+        contentType: "text/html",
+      }),
+    },
+  });
+  await app3.ready();
+  await app3.inject({ method: "GET", url: "/extract?url=http://off.test/" });
+  await new Promise((r) => setImmediate(r));
+  assert.equal(called, false);
+  await app3.close();
+});
+
 test("buildServer skips renderer.close when the renderer has no close()", async () => {
   // Some renderer implementations might be stateless and not provide a close()
   // method. The onClose hook should tolerate that.
