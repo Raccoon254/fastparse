@@ -3,7 +3,21 @@
   "version": "0.0.1",
   "description": "Fetch a web page and get back the actual content as JSON. No nav, no footers, just the title and the text under each heading.",
   "type": "module",
-  "main": "src/index.js",
+  "main": "./src/extract.js",
+  "exports": {
+    ".": "./src/extract.js",
+    "./server": "./src/api/server.js",
+    "./config": "./src/config/index.js"
+  },
+  "bin": {
+    "fastparse": "./bin/fastparse.js"
+  },
+  "files": [
+    "src/",
+    "bin/",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "start": "node src/index.js",
     "dev": "nodemon src/index.js",

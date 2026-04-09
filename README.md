@@ -8,12 +8,65 @@ It exists because feeding raw HTML (or even the raw text of a page) to an LLM is
 
 Status: works on most static pages, SPAs (via Playwright), and emits both structured JSON and clean markdown.
 
-## Usage
+## Three ways to use it
+
+### 1. As a CLI
 
 ```bash
 git clone git@github.com:Raccoon254/fastparse.git
 cd fastparse
 npm install
+node bin/fastparse.js https://en.wikipedia.org/wiki/Web_scraping
+```
+
+Common flags:
+
+```bash
+# Just the markdown, piped to a file
+node bin/fastparse.js https://example.com/article --format markdown --raw > article.md
+
+# Top 3 longest sections, as JSON
+node bin/fastparse.js https://example.com/article --mode summary --max 3
+
+# Extract + archive, print nothing
+node bin/fastparse.js https://example.com/article --quiet
+```
+
+Run with `--help` for the full list.
+
+### 2. As a library
+
+```js
+import { extract } from "fastparse";
+
+const doc = await extract("https://example.com/article", {
+  format: "markdown",
+  mode: "summary",
+  maxSections: 3,
+});
+console.log(doc.content);
+```
+
+For advanced use (custom cache, limiter, storage, renderer), build your own extractor:
+
+```js
+import { createExtractor } from "fastparse";
+import { createCache } from "fastparse/cache";
+import { createStorage } from "fastparse/config";
+
+const extractor = createExtractor({
+  cache: createCache({ max: 1000, ttlMs: 3600_000 }),
+  storage: createStorage({ enabled: true, dir: "/var/lib/myapp/pages" }),
+});
+
+const doc = await extractor.extract("https://example.com/article");
+```
+
+Errors come out as `ExtractError` with a stable `code` (`invalid-url`, `invalid-format`, `invalid-mode`, `invalid-max`, `no-content`, `fetch-failed`), so you can map them to whatever your service uses.
+
+### 3. As an HTTP server
+
+```bash
 npm run dev
 ```
 
@@ -165,19 +218,23 @@ That's the whole engine. Each step is one file under `src/`.
 
 ```
 src/
-  fetch/    undici GET, AbortController timeout, content-type guard
-  render/   thin-content detector + Playwright renderer (lazy)
-  cache/    LRU wrapper (lru-cache)
-  limit/    per-host concurrency + token-bucket rate limit
-  parse/    cheerio load + noise stripping, title resolution
-  score/    node scoring heuristics
-  extract/  pick the winning container
-  format/   walk the container into sections + markdown via turndown
-  optimize/ dedup, drop tiny sections, summary mode (json + markdown)
-  storage/  archive each extraction to {dir}/{host}/{path}/{timestamp}.{ext}
-  config/   defaults + env-var overrides
-  api/      Fastify server
-  index.js  boot the server
+  extract.js   the whole pipeline as a single async function (library entry)
+  cli.js       argv parsing + runCli(argv, io)
+  index.js     boot the HTTP server
+  fetch/       undici GET, AbortController timeout, content-type guard
+  render/      thin-content detector + Playwright renderer (lazy)
+  cache/       LRU wrapper (lru-cache)
+  limit/       per-host concurrency + token-bucket rate limit
+  parse/       cheerio load + noise stripping, title resolution
+  score/       node scoring heuristics
+  extract/     pick the winning container
+  format/      walk the container into sections + markdown via turndown
+  optimize/    dedup, drop tiny sections, summary mode (json + markdown)
+  storage/     archive each extraction to {dir}/{host}/{path}/{timestamp}.{ext}
+  config/      defaults + env-var overrides
+  api/         Fastify HTTP shell over createExtractor
+bin/
+  fastparse.js shebang script that calls runCli
 ```
 
 ## SPA support
@@ -206,7 +263,7 @@ npm run test:e2e          # real Playwright against a local SPA fixture
 npm run test:coverage     # unit + integration with V8 coverage, gated at 100%
 ```
 
-157 unit + integration tests, 2 e2e, 100% line / branch / function coverage on `src/`. CI runs lint → unit → integration → coverage gate + e2e (Playwright) + smoke (real HTTP boot) on Node 20 and 22.
+195 unit + integration tests, 2 e2e, 100% line / branch / function coverage on `src/`. CI runs lint → unit → integration → coverage gate + e2e (Playwright) + smoke (real HTTP boot) on Node 20 and 22.
 
 ## Persistent storage
 
@@ -236,17 +293,17 @@ The `data/` directory is gitignored.
 
 Defaults live in `src/config/index.js` and can be overridden either by passing a config object to `loadConfig({ overrides })` or by setting environment variables before booting the server:
 
-| Env var | Default | Notes |
-|---|---|---|
-| `FASTPARSE_HOST` | `127.0.0.1` | bind address |
-| `FASTPARSE_PORT` | `3000` | server port |
-| `FASTPARSE_STORAGE_ENABLED` | `true` | set to `false` to disable disk archiving |
-| `FASTPARSE_STORAGE_DIR` | `./data` | absolute or relative path |
-| `FASTPARSE_STORAGE_FORMATS` | `json,markdown` | comma-separated subset |
-| `FASTPARSE_CACHE_MAX` | `500` | LRU max entries |
-| `FASTPARSE_CACHE_TTL_MS` | `600000` | LRU TTL |
-| `FASTPARSE_LIMIT_CONCURRENCY` | `4` | per-host concurrent requests |
-| `FASTPARSE_LIMIT_RPS` | `4` | per-host token-bucket refill rate |
+| Env var                       | Default         | Notes                                    |
+|-------------------------------|-----------------|------------------------------------------|
+| `FASTPARSE_HOST`              | `127.0.0.1`     | bind address                             |
+| `FASTPARSE_PORT`              | `3000`          | server port                              |
+| `FASTPARSE_STORAGE_ENABLED`   | `true`          | set to `false` to disable disk archiving |
+| `FASTPARSE_STORAGE_DIR`       | `./data`        | absolute or relative path                |
+| `FASTPARSE_STORAGE_FORMATS`   | `json,markdown` | comma-separated subset                   |
+| `FASTPARSE_CACHE_MAX`         | `500`           | LRU max entries                          |
+| `FASTPARSE_CACHE_TTL_MS`      | `600000`        | LRU TTL                                  |
+| `FASTPARSE_LIMIT_CONCURRENCY` | `4`             | per-host concurrent requests             |
+| `FASTPARSE_LIMIT_RPS`         | `4`             | per-host token-bucket refill rate        |
 
 ```bash
 FASTPARSE_STORAGE_DIR=/var/lib/fastparse \

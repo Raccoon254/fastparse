@@ -576,6 +576,33 @@ test("GET /extract does not call storage when storage.enabled=false", async () =
   await app3.close();
 });
 
+test("buildServer maps unknown ExtractError codes to 500", async () => {
+  // Defensive coverage: if a future ExtractError code isn't in the
+  // status map, the server should fall back to 500.
+  const fallbackApp = buildServer({
+    logger: false,
+    deps: {
+      extractor: {
+        extract: async () => {
+          const err = new (await import("../../src/extract.js")).ExtractError(
+            "future-code",
+            "something new",
+          );
+          throw err;
+        },
+        renderer: { close: async () => {} },
+      },
+    },
+  });
+  await fallbackApp.ready();
+  const res = await fallbackApp.inject({
+    method: "GET",
+    url: "/extract?url=http://x.test/",
+  });
+  assert.equal(res.statusCode, 500);
+  await fallbackApp.close();
+});
+
 test("buildServer skips renderer.close when the renderer has no close()", async () => {
   // Some renderer implementations might be stateless and not provide a close()
   // method. The onClose hook should tolerate that.
